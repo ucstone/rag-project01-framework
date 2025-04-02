@@ -7,6 +7,8 @@ from pathlib import Path
 from pymilvus import connections, utility
 from pymilvus import Collection, DataType, FieldSchema, CollectionSchema
 from utils.config import VectorDBProvider, MILVUS_CONFIG  # Updated import
+import re
+from pypinyin import pinyin, Style
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +146,27 @@ class VectorStoreService:
             logger.error(f"Error loading embeddings from {file_path}: {str(e)}")
             raise
     
+    def _sanitize_collection_name(self, name: str) -> str:
+        """
+        清理集合名称，将中文转换为拼音，确保只包含有效的ASCII字符
+        
+        参数:
+            name: 原始名称
+            
+        返回:
+            清理后的名称
+        """
+        # 将中文转换为拼音，不使用声调
+        py_list = pinyin(name, style=Style.NORMAL, strict=False)
+        # 将拼音列表转换为字符串，直接连接（不使用下划线）
+        py_str = ''.join([''.join(item) for item in py_list])
+        # 将非ASCII字符替换为下划线
+        sanitized = re.sub(r'[^\x00-\x7F]+', '_', py_str)
+        # 确保以字母或下划线开头
+        if not (sanitized[0].isalpha() or sanitized[0] == '_'):
+            sanitized = f"_{sanitized}"
+        return sanitized
+
     def _index_to_milvus(self, embeddings_data: Dict[str, Any], config: VectorDBConfig) -> Dict[str, Any]:
         """
         将嵌入向量索引到Milvus数据库
@@ -161,9 +184,8 @@ class VectorStoreService:
             # 如果有 .pdf 后缀，移除它
             base_name = filename.replace('.pdf', '') if filename else "doc"
             
-            # Ensure the collection name starts with a letter or underscore
-            if not base_name[0].isalpha() and base_name[0] != '_':
-                base_name = f"_{base_name}"
+            # 清理基础名称
+            base_name = self._sanitize_collection_name(base_name)
             
             # Get embedding provider
             embedding_provider = embeddings_data.get("embedding_provider", "unknown")

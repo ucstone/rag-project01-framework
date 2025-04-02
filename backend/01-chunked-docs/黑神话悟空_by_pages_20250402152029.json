@@ -1,0 +1,55 @@
+{
+  "filename": "黑神话悟空.pdf",
+  "total_chunks": 5,
+  "total_pages": 5,
+  "loading_method": "pymupdf",
+  "chunking_method": "by_pages",
+  "timestamp": "2025-04-02T15:20:29.004940",
+  "chunks": [
+    {
+      "content": "08.20\n直面天命",
+      "metadata": {
+        "chunk_id": 1,
+        "page_number": 1,
+        "page_range": "1",
+        "word_count": 2
+      }
+    },
+    {
+      "content": "序章\n《黑神话：悟空》是一款基于《西游记》改编的中国神话动作角色扮演游戏，玩家化身\n“天命之人”，在险象环生的西游冒险中追寻传说背后的秘密。",
+      "metadata": {
+        "chunk_id": 2,
+        "page_number": 2,
+        "page_range": "2",
+        "word_count": 3
+      }
+    },
+    {
+      "content": "改编自公元1592年中国神魔小说《西游记》",
+      "metadata": {
+        "chunk_id": 3,
+        "page_number": 3,
+        "page_range": "3",
+        "word_count": 1
+      }
+    },
+    {
+      "content": "启程\nB\nL\nA\nC\nK\nM\nY\nT\nH\n第\n壹\n章\n关卡多端\n雄奇壮丽，光怪陆离\n重走西游故地，再写神话结局\nW\nU\nK\nO\nN\nG\n启程\n无惧\n历练\n逢缘",
+      "metadata": {
+        "chunk_id": 4,
+        "page_number": 4,
+        "page_range": "4",
+        "word_count": 26
+      }
+    },
+    {
+      "content": "天命\n你,也想当神仙?\n天命人\nT\nI\nA\nN\nM\nI\nN\nG\n世\n人\n都\n晓\n神\n仙\n好\n唯\n有\n功\n名\n忘\n不\n了\n古\n今\n将\n相\n在\n何\n方\n荒\n冢\n一\n堆\n草\n末\n了\n启程\n无惧\n历练\n逢缘",
+      "metadata": {
+        "chunk_id": 5,
+        "page_number": 5,
+        "page_range": "5",
+        "word_count": 43
+      }
+    }
+  ]
+}

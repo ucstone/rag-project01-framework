@@ -172,3 +172,7 @@ cython_debug/
 
 # 忽略所有 .vscode 目录
 .vscode/
+
+# 忽略chroma数据库
+chroma/
+*.db
