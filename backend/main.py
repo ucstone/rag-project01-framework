@@ -249,6 +249,21 @@ async def index_embeddings(data: dict):
         if not all([file_id, vector_db, index_mode]):
             raise ValueError("Missing required fields")
             
+        # 验证向量数据库和索引模式
+        if vector_db not in ["milvus", "chroma"]:
+            raise HTTPException(status_code=400, detail="Invalid vector database provider")
+        
+        # 验证索引模式
+        valid_modes = {
+            "milvus": ["flat", "hnsw", "auto"],
+            "chroma": ["hnsw", "flat", "cosine", "l2"]
+        }
+        if index_mode not in valid_modes.get(vector_db, []):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid index mode for {vector_db}. Valid modes are: {', '.join(valid_modes.get(vector_db, []))}"
+            )
+            
         embedding_file = os.path.join("02-embedded-docs", file_id)
         if not os.path.exists(embedding_file):
             raise FileNotFoundError(f"Embedding file not found: {file_id}")
@@ -267,33 +282,26 @@ async def index_embeddings(data: dict):
 
 @app.get("/providers")
 async def get_providers():
-    """获取支持的向量数据库列表"""
-    try:
-        search_service = SearchService()
-        providers = search_service.get_providers()
-        return {"providers": providers}
-    except Exception as e:
-        logger.error(f"Error getting providers: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+    """Get list of available vector database providers"""
+    return {
+        "providers": [
+            {"id": "milvus", "name": "Milvus"},
+            {"id": "chroma", "name": "Chroma"}
+        ]
+    }
 
 @app.get("/collections")
 async def get_collections(
     provider: VectorDBProvider = Query(default=VectorDBProvider.MILVUS)
 ):
-    """获取指定向量数据库中的集合"""
+    """Get collections for the specified provider"""
     try:
-        search_service = SearchService()
-        collections = search_service.list_collections(provider.value)
+        vector_store_service = VectorStoreService()
+        collections = vector_store_service.list_collections(provider)
         return {"collections": collections}
     except Exception as e:
         logger.error(f"Error getting collections: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search")
 async def search(

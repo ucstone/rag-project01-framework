@@ -6,9 +6,11 @@ import logging
 from pathlib import Path
 from pymilvus import connections, utility
 from pymilvus import Collection, DataType, FieldSchema, CollectionSchema
-from utils.config import VectorDBProvider, MILVUS_CONFIG  # Updated import
+from utils.config import VectorDBProvider, MILVUS_CONFIG, CHROMA_CONFIG  # Updated import
 import re
 from pypinyin import pinyin, Style
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class VectorDBConfig:
         self.provider = provider
         self.index_mode = index_mode
         self.milvus_uri = MILVUS_CONFIG["uri"]
+        self.chroma_persist_directory = CHROMA_CONFIG["persist_directory"]
 
     def _get_milvus_index_type(self, index_mode: str) -> str:
         """
@@ -52,18 +55,78 @@ class VectorDBConfig:
         """
         return MILVUS_CONFIG["index_params"].get(index_mode, {})
 
+    def _get_chroma_index_type(self, index_mode: str) -> str:
+        """
+        根据索引模式获取Chroma索引类型
+        
+        参数:
+            index_mode: 索引模式
+            
+        返回:
+            对应的Chroma索引类型
+        """
+        return CHROMA_CONFIG["index_types"].get(index_mode, "hnsw")
+
 class VectorStoreService:
     """
     向量存储服务类，提供向量数据的索引、查询和管理功能
     """
+    _instance = None
+    _embedding_model = None
+    _chroma_client = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(VectorStoreService, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self):
         """
         初始化向量存储服务
         """
-        self.initialized_dbs = {}
-        # 确保存储目录存在
-        os.makedirs("03-vector-store", exist_ok=True)
+        if not hasattr(self, 'initialized'):
+            self.initialized = True
+            self.initialized_dbs = {}
+            # 确保存储目录存在
+            os.makedirs("03-vector-store", exist_ok=True)
+            os.makedirs(CHROMA_CONFIG["persist_directory"], exist_ok=True)
+            # 初始化 Chroma 客户端
+            self._init_chroma_client()
     
+    def _init_chroma_client(self):
+        """
+        初始化 Chroma 客户端
+        """
+        if self._chroma_client is None:
+            from chromadb import PersistentClient
+            from chromadb.config import Settings
+            
+            self._chroma_client = PersistentClient(
+                path=CHROMA_CONFIG["persist_directory"],
+                settings=Settings(
+                    anonymized_telemetry=False,
+                    allow_reset=True
+                )
+            )
+
+    def _get_chroma_client(self):
+        """
+        获取 Chroma 客户端实例
+        """
+        if self._chroma_client is None:
+            self._init_chroma_client()
+        return self._chroma_client
+
+    def _get_embedding_model(self):
+        """
+        获取或创建 embedding 模型实例
+        """
+        if self._embedding_model is None:
+            self._embedding_model = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-mpnet-base-v2"
+            )
+        return self._embedding_model
+
     def _get_milvus_index_type(self, config: VectorDBConfig) -> str:
         """
         从配置对象获取Milvus索引类型
@@ -87,6 +150,18 @@ class VectorStoreService:
             Milvus索引参数字典
         """
         return config._get_milvus_index_params(config.index_mode)
+
+    def _get_chroma_index_type(self, config: VectorDBConfig) -> str:
+        """
+        从配置对象获取Chroma索引类型
+        
+        参数:
+            config: 向量数据库配置对象
+            
+        返回:
+            Chroma索引类型
+        """
+        return config._get_chroma_index_type(config.index_mode)
     
     def index_embeddings(self, embedding_file: str, config: VectorDBConfig) -> Dict[str, Any]:
         """
@@ -107,6 +182,8 @@ class VectorStoreService:
         # 根据不同的数据库进行索引
         if config.provider == VectorDBProvider.MILVUS:
             result = self._index_to_milvus(embeddings_data, config)
+        elif config.provider == VectorDBProvider.CHROMA:
+            result = self._index_to_chroma(embeddings_data, config)
         
         end_time = datetime.now()
         processing_time = (end_time - start_time).total_seconds()
@@ -286,8 +363,9 @@ class VectorStoreService:
             insert_result = collection.insert(entities)
             
             # 创建索引
+            logger.info(f"Creating index with type: {config.index_mode}")
             index_params = {
-                "metric_type": "COSINE",
+                "metric_type": "L2",
                 "index_type": self._get_milvus_index_type(config),
                 "params": self._get_milvus_index_params(config)
             }
@@ -306,7 +384,84 @@ class VectorStoreService:
         finally:
             connections.disconnect("default")
 
-    def list_collections(self, provider: str) -> List[str]:
+    def _index_to_chroma(self, embeddings_data: Dict[str, Any], config: VectorDBConfig) -> Dict[str, Any]:
+        """
+        将嵌入向量索引到Chroma数据库
+        
+        参数:
+            embeddings_data: 嵌入向量数据
+            config: 向量数据库配置对象
+            
+        返回:
+            索引结果信息字典
+        """
+        try:
+            # 使用 filename 作为 collection 名称前缀
+            filename = embeddings_data.get("filename", "")
+            # 如果有 .pdf 后缀，移除它
+            base_name = filename.replace('.pdf', '') if filename else "doc"
+            
+            # 清理基础名称
+            base_name = self._sanitize_collection_name(base_name)
+            
+            # Get embedding provider
+            embedding_provider = embeddings_data.get("embedding_provider", "unknown")
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            collection_name = f"{base_name}_{embedding_provider}_{timestamp}"
+            
+            logger.info(f"Creating Chroma collection: {collection_name}")
+
+            # 准备数据
+            texts = []
+            metadatas = []
+            embeddings = []
+            
+            for emb in embeddings_data["embeddings"]:
+                texts.append(str(emb["metadata"].get("content", "")))
+                metadata = {
+                    "document_name": embeddings_data.get("filename", ""),
+                    "chunk_id": int(emb["metadata"].get("chunk_id", 0)),
+                    "total_chunks": int(emb["metadata"].get("total_chunks", 0)),
+                    "word_count": int(emb["metadata"].get("word_count", 0)),
+                    "page_number": str(emb["metadata"].get("page_number", 0)),
+                    "page_range": str(emb["metadata"].get("page_range", "")),
+                    "embedding_provider": embeddings_data.get("embedding_provider", ""),
+                    "embedding_model": embeddings_data.get("embedding_model", ""),
+                    "embedding_timestamp": str(emb["metadata"].get("embedding_timestamp", ""))
+                }
+                metadatas.append(metadata)
+                embeddings.append([float(x) for x in emb.get("embedding", [])])
+
+            logger.info(f"Prepared {len(texts)} documents for indexing")
+
+            # 获取 Chroma 客户端并创建集合
+            client = self._get_chroma_client()
+            collection = client.create_collection(
+                name=collection_name,
+                metadata={"hnsw:space": "cosine"}
+            )
+
+            # 添加数据
+            logger.info("Adding documents to Chroma...")
+            collection.add(
+                documents=texts,
+                metadatas=metadatas,
+                embeddings=embeddings,
+                ids=[f"doc_{i}" for i in range(len(texts))]
+            )
+
+            logger.info(f"Successfully indexed {len(texts)} documents to Chroma collection: {collection_name}")
+
+            return {
+                "collection_name": collection_name,
+                "index_size": len(texts)
+            }
+
+        except Exception as e:
+            logger.error(f"Error indexing to Chroma: {str(e)}")
+            raise
+
+    def list_collections(self, provider: VectorDBProvider) -> List[Dict[str, Any]]:
         """
         列出指定提供商的所有集合
         
@@ -314,57 +469,149 @@ class VectorStoreService:
             provider: 向量数据库提供商
             
         返回:
-            集合名称列表
+            集合列表，每个集合包含 id、name 和 count 字段
         """
-        if provider == VectorDBProvider.MILVUS:
-            try:
-                connections.connect(alias="default", uri=MILVUS_CONFIG["uri"])
-                collections = utility.list_collections()
+        try:
+            if provider == VectorDBProvider.MILVUS:
+                # 连接到Milvus
+                connections.connect(
+                    alias="default",
+                    uri=MILVUS_CONFIG["uri"]
+                )
+                
+                # 获取所有集合名称
+                collection_names = utility.list_collections()
+                
+                collections = []
+                for name in collection_names:
+                    try:
+                        collection = Collection(name)
+                        collection.load()
+                        collections.append({
+                            "id": name,
+                            "name": name,
+                            "count": collection.num_entities
+                        })
+                    except Exception as e:
+                        logger.error(f"Error getting collection info for {name}: {str(e)}")
+                        continue
+                
                 return collections
-            finally:
-                connections.disconnect("default")
-        return []
+                
+            elif provider == VectorDBProvider.CHROMA:
+                client = self._get_chroma_client()
+                collections = []
+                
+                # 获取所有集合
+                for collection in client.list_collections():
+                    try:
+                        collections.append({
+                            "id": collection.name,
+                            "name": collection.name,
+                            "count": collection.count()
+                        })
+                    except Exception as e:
+                        logger.error(f"Error getting collection info for {collection.name}: {str(e)}")
+                        continue
+                
+                return collections
+            
+            return []
+            
+        except Exception as e:
+            logger.error(f"Error listing collections for {provider}: {str(e)}")
+            return []
 
     def delete_collection(self, provider: str, collection_name: str) -> bool:
         """
         删除指定的集合
         
         参数:
-            provider: 向量数据库提供商
+            provider: 向量数据库提供商名称
             collection_name: 集合名称
             
         返回:
             是否删除成功
         """
-        if provider == VectorDBProvider.MILVUS:
-            try:
+        try:
+            if provider == VectorDBProvider.MILVUS:
                 connections.connect(alias="default", uri=MILVUS_CONFIG["uri"])
                 utility.drop_collection(collection_name)
-                return True
-            finally:
                 connections.disconnect("default")
-        return False
+                return True
+            elif provider == VectorDBProvider.CHROMA:
+                client = self._get_chroma_client()
+                try:
+                    # 使用 Chroma 客户端的 API 删除集合
+                    client.delete_collection(collection_name)
+                    logger.info(f"Successfully deleted Chroma collection: {collection_name}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Error deleting Chroma collection {collection_name}: {str(e)}")
+                    return False
+            else:
+                raise ValueError(f"Unsupported vector database provider: {provider}")
+        except Exception as e:
+            logger.error(f"Error deleting collection: {str(e)}")
+            return False
 
-    def get_collection_info(self, provider: str, collection_name: str) -> Dict[str, Any]:
+    def get_collection_info(self, provider: VectorDBProvider, collection_name: str) -> Dict[str, Any]:
         """
-        获取指定集合的信息
+        获取指定集合的详细信息
         
         参数:
             provider: 向量数据库提供商
             collection_name: 集合名称
             
         返回:
-            集合信息字典
+            集合详细信息字典
         """
-        if provider == VectorDBProvider.MILVUS:
-            try:
-                connections.connect(alias="default", uri=MILVUS_CONFIG["uri"])
+        try:
+            if provider == VectorDBProvider.MILVUS:
+                # 连接到Milvus
+                connections.connect(
+                    alias="default",
+                    uri=MILVUS_CONFIG["uri"]
+                )
+                
                 collection = Collection(collection_name)
+                collection.load()
+                
+                # 获取集合信息
+                schema = collection.schema
+                fields = [field.to_dict() for field in schema.fields]
+                
                 return {
                     "name": collection_name,
                     "num_entities": collection.num_entities,
-                    "schema": collection.schema.to_dict()
+                    "schema": {
+                        "fields": fields
+                    }
                 }
-            finally:
-                connections.disconnect("default")
-        return {}
+                
+            elif provider == VectorDBProvider.CHROMA:
+                client = self._get_chroma_client()
+                try:
+                    collection = client.get_collection(collection_name)
+                    return {
+                        "name": collection_name,
+                        "num_entities": collection.count(),
+                        "schema": {
+                            "fields": [
+                                {
+                                    "name": "embedding",
+                                    "index_type": "hnsw",
+                                    "params": {"space_type": "cosine"}
+                                }
+                            ]
+                        }
+                    }
+                except Exception as e:
+                    logger.error(f"Error getting Chroma collection info: {str(e)}")
+                    raise ValueError(f"Collection {collection_name} not found")
+            
+            raise ValueError(f"Unsupported vector database provider: {provider}")
+            
+        except Exception as e:
+            logger.error(f"Error getting collection info: {str(e)}")
+            raise
